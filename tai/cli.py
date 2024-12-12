@@ -1,168 +1,236 @@
-#!/usr/bin/python3
-
 import os
 import sys
-import re
 import signal
 from types import FrameType
-import openai
-from openai import OpenAI
-from openai.types.chat import ChatCompletion
+import google.generativeai as genai
+from google.generativeai.types import RequestOptions
+from google.api_core import retry
+from rich.console import Console
+from rich.panel import Panel
+from rich.prompt import Prompt
+from typing_extensions import TypedDict
+
+# Initialize Rich console
+console = Console()
 
 
 def handle_sigint(signum: int, frame: FrameType) -> None:
     """Signal handler for Ctrl+C (SIGINT)."""
-    print("\nCtrl+C detected. Exiting gracefully...")
+    console.print("\nCtrl+C detected. Exiting gracefully...")
     sys.exit(0)
 
 
-def get_openai_client() -> OpenAI:
-    """Retrieves the OpenAI API key and creates a OpenAI client instance.
+def get_gemini_client():
+    """Configures and returns the Gemini API client with grounding enabled.
 
     Raises:
-        ValueError: If the OPENAI_API_KEY environment variable is not set.
+        ValueError: If the GEMINI_API_KEY environment variable is not set.
     """
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        raise ValueError("OPENAI_API_KEY environment variable is not set")
+        raise ValueError("GEMINI_API_KEY environment variable is not set")
 
-    return OpenAI()
+    genai.configure(api_key=api_key)
+    return genai.GenerativeModel("gemini-exp-1206")
 
 
 def generate_system_prompt() -> str:
-    """Returns the system prompt for the LLM interaction."""
+    """Returns the optimized system prompt for the LLM interaction."""
+    return """YOU ARE A WORLD-CLASS SYSTEM ADMINISTRATOR AND ELITE HACKER WITH UNPARALLELED EXPERTISE IN WINDOWS COMMAND PROMPT AND POWERSHELL. YOUR TASK IS TO ACCURATELY INTERPRET QUESTIONS ABOUT COMMANDS AND PROVIDE RESPONSES STRICTLY FOLLOWING THE SPECIFIED JSON SCHEMA.
 
-    return """
-You are a system administrator and elite hacker that knows all about the terminal in linux and mac. I provide you with a question about a command, and you give me back a response which shows the command, then a short explanation. If you get asked about the command tai, reply "tai query" with explanation 'This is me'. It is important you do not return commands you do not know. If that is the case, just respond 'I do not know'.
+###INSTRUCTIONS###
 
-Return your answer as a markdown code block with the command and explanation as this example: \n```\nls -al\n```\n\nExplanation: list files and folders.
-"""
+- ANALYZE the provided command or question with precision.
+- If the command is KNOWN, PROVIDE the exact command to execute and a BRIEF, CLEAR explanation of its function.
+- If the command is UNKNOWN, EXPLICITLY INDICATE this by setting "known_command" to false and PROVIDE a generic explanation indicating the lack of knowledge.
+- ENSURE your response STRICTLY MATCHES the JSON schema provided below.
+
+###EXPECTED JSON SCHEMA###
+Your response MUST conform to the following schema:
+{
+    "command": "the command to execute",
+    "explanation": "brief explanation of what the command does",
+    "known_command": true/false
+}
+
+###EXAMPLE RESPONSES###
+
+- Example response for a KNOWN command:
+{
+    "command": "dir /a",
+    "explanation": "Lists all files and folders, including hidden ones",
+    "known_command": true
+}
+
+- Example response for an UNKNOWN command:
+{
+    "command": "",
+    "explanation": "I do not know this command",
+    "known_command": false
+}
+
+###ADDITIONAL GUIDANCE###
+
+- MAINTAIN clarity and conciseness in explanations.
+- NEVER deviate from the JSON format.
+- If a command has MULTIPLE USE CASES, provide the most common or relevant one unless otherwise specified.
+
+###WHAT NOT TO DO###
+
+- NEVER RETURN A RESPONSE THAT DOES NOT MATCH THE JSON SCHEMA.
+- NEVER PROVIDE AN INCORRECT OR UNSUPPORTED COMMAND AS "KNOWN."
+- NEVER INCLUDE UNNECESSARY INFORMATION OUTSIDE THE JSON FORMAT.
+- NEVER OMIT AN EXPLANATION, EVEN FOR UNKNOWN COMMANDS.
+
+###TASK OBJECTIVE###
+ENSURE THAT ALL RESPONSES ARE PRECISE, ACCURATE, AND CONSISTENT WITH THE EXPECTED JSON SCHEMA."""
 
 
-def handle_stream(stream: ChatCompletion) -> str:
-    """Processes the output stream from the LLM, printing each response chunk.
+def get_response_schema() -> dict:
+    """Returns the JSON schema for structured command responses."""
+    return {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string", "description": "The command to execute"},
+            "explanation": {
+                "type": "string",
+                "description": "Brief explanation of what the command does",
+            },
+            "known_command": {
+                "type": "boolean",
+                "description": "Whether the command is known and valid",
+            },
+        },
+        "required": ["command", "explanation", "known_command"],
+    }
+
+
+def handle_stream(response) -> str:
+    """Processes the response from the LLM.
 
     Args:
-        stream (ChatCompletion): An iterator of chunks representing
-        LLM responses.
+        response: The response from the Gemini API.
     """
-    response = []
+    if not response or not response.text:
+        return ""
 
-    for chunk in stream:
-        if chunk.choices[0].delta.content:
-            response.append(chunk.choices[0].delta.content)
-
-            print(chunk.choices[0].delta.content, end="", flush=True)
-
-    return "".join(response)
+    # Display the response as formatted markdown
+    return response.text.strip()
 
 
-def send_chat_query(query: str, client: OpenAI) -> ChatCompletion:
-    """Sends a query to the OpenAI API and handles the response.
+def send_chat_query(query: str, model) -> str:
+    """Sends a query to the Gemini API.
 
     Args:
         query (str): The user's query.
-        client (OpenAI): The OpenAI client instance.
+        model: The Gemini model instance.
     """
     try:
-        stream = client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": generate_system_prompt()},
-                {"role": "user", "content": query},
-            ],
-            model="gpt-4o",
-            stream=True,
+        # Configure retry options
+        retry_options = RequestOptions(
+            retry=retry.Retry(
+                initial=10,  # Initial delay in seconds
+                multiplier=2,  # Multiplier for exponential backoff
+                maximum=60,  # Maximum delay between retries
+                timeout=300,  # Total timeout in seconds
+            ),
         )
 
-        return stream
+        # Define the response schema using TypedDict
+        class CommandResponse(TypedDict):
+            command: str
+            explanation: str
+            known_command: bool
 
-    except openai.APIConnectionError as e:
-        print("The server could not be reached")
-        print(e.__cause__)
-    except openai.RateLimitError as e:
-        print("A 429 status code was received; we should back off a bit.")
-        print(e.response)
-    except openai.APIStatusError as e:
-        print("Another non-200-range status code was received")
-        print(e.status_code)
-        print(e.response)
+        response = model.generate_content(
+            [
+                {"role": "user", "parts": [generate_system_prompt(), query]},
+            ],
+            request_options=retry_options,
+            generation_config=genai.GenerationConfig(
+                temperature=0.2,
+                response_mime_type="application/json",
+                response_schema=CommandResponse,
+            ),
+        )
+        return handle_stream(response)
+    except Exception as e:
+        console.print(f"[red]Error generating content: {str(e)}[/red]")
+        return ""
 
 
-def extract_command(text: str) -> str:
-    """Extracts the command from the response.
+def parse_response(text: str) -> tuple[str, str]:
+    """Parses the JSON response from the LLM.
 
     Args:
-        text (str): The response from the LLM.
+        text (str): The JSON response text.
 
     Returns:
-        str: The command extracted from the response.
+        tuple[str, str]: The command and its explanation.
     """
-    pattern = r"```\n(.*?)\n```"
-    match = re.search(pattern, text, re.DOTALL)
+    try:
+        import json
 
-    if match:
-        command = match.group(1)
+        response_data = json.loads(text)
 
-        return command
+        if not response_data.get("known_command", False):
+            console.print("[yellow]Command not recognized[/yellow]")
+            return "", ""
+
+        command = response_data.get("command", "").strip()
+        explanation = response_data.get("explanation", "").strip()
+
+        if command and explanation:
+            console.print(
+                Panel(
+                    f"Command: {command}\nExplanation: {explanation}",
+                    title="Command Details",
+                ),
+                style="bold green",
+            )
+            return command, explanation
+
+        return "", ""
+    except json.JSONDecodeError:
+        console.print("[red]Error: Invalid response format[/red]")
+        return "", ""
 
 
 def edit_command(command: str) -> str:
-    """Allows the user to edit the command before execution.
-
-    Args:
-        command (str): The original command.
-
-    Returns:
-        str: The edited command.
-    """
-    print(f"\nEdit and execute the current command: {command}")
-
-    edited_command = input("> ")
-
+    console.print(Panel(f"Current command: {command}", title="Edit Command"))
+    edited_command = Prompt.ask("> ")
     return edited_command.strip() if edited_command.strip() else command
 
 
 def execute_command(command: str) -> None:
-    """Executes the command in the terminal.
-
-    Args:
-        command (str): The command to execute.
-    """
-    query = input("\n\n> Execute the command? (N/e/y): ")
-    if query.lower() == "y" or query.lower() == "yes":
+    query = Prompt.ask("\nExecute the command?", choices=["y", "n", "e"], default="n")
+    if query.lower() == "y":
         os.system(command)
-    elif query.lower() == "e" or query.lower() == "edit":
+    elif query.lower() == "e":
         edited_command = edit_command(command)
         os.system(edited_command)
     else:
-        print("\nExiting...")
+        console.print("\n[yellow]Exiting...[/yellow]")
 
 
 def main():
-    """Initializes the OpenAI client, and processes the query."""
-
+    """Initializes the Gemini client and processes the query."""
     signal.signal(signal.SIGINT, handle_sigint)
 
     if len(sys.argv) < 2:
-        print("Usage: tai <query>")
-
+        console.print("[red]Usage: tai <query>[/red]")
         sys.exit(1)
 
     query = " ".join(sys.argv[1:])
 
     try:
-        client = get_openai_client()
-        stream = send_chat_query(query, client)
-
-        response = handle_stream(stream)
-
-        command = extract_command(response)
-
+        model = get_gemini_client()
+        response = send_chat_query(query, model)
+        command, _ = parse_response(response)
         if command:
             execute_command(command)
-
     except ValueError as e:
-        print(f"Error: {e}")
+        console.print(f"[red]Error: {e}[/red]")
 
 
 if __name__ == "__main__":
