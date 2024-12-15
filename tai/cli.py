@@ -2,6 +2,7 @@ import os
 import sys
 import signal
 import platform
+import logging
 from types import FrameType
 import subprocess
 import google.generativeai as genai
@@ -12,6 +13,10 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 from typing_extensions import TypedDict
 import pathlib
+
+# Suppress gRPC warnings
+logging.getLogger('absl').setLevel(logging.ERROR)
+os.environ['GRPC_PYTHON_LOG_LEVEL'] = 'error'
 
 # Initialize Rich console
 console = Console()
@@ -55,82 +60,53 @@ def execute_shell_command(command: str) -> int:
             escaped_command = command.replace('"', '`"')
             powershell_command = f'powershell.exe -NoProfile -NonInteractive -Command "& {{{escaped_command}}}"'
 
-            process = subprocess.Popen(
-                powershell_command,
-                shell=True,
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1  # Line buffered
-            )
+            # Execute command with a timeout
+            try:
+                result = subprocess.run(
+                    powershell_command,
+                    shell=True,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    timeout=30  # 30 second timeout
+                )
+
+                # Print output
+                if result.stdout:
+                    console.print(result.stdout.strip())
+                if result.stderr:
+                    console.print("[red]" + result.stderr.strip() + "[/red]")
+
+                return result.returncode
+
+            except subprocess.TimeoutExpired:
+                console.print("[red]Command timed out after 30 seconds[/red]")
+                return 1
+
         else:
-            # Use the default shell on Unix-like systems
-            process = subprocess.Popen(
-                command,
-                shell=True,
-                executable="/bin/bash" if IS_LINUX else "/bin/zsh" if IS_MACOS else None,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1  # Line buffered
-            )
-
-        from threading import Thread
-        from queue import Queue, Empty
-
-        def enqueue_output(out, queue):
-            for line in iter(out.readline, ''):
-                queue.put(line)
-            out.close()
-
-        # Create queues for stdout and stderr
-        stdout_q = Queue()
-        stderr_q = Queue()
-
-        # Start threads to read stdout and stderr
-        Thread(target=enqueue_output, args=(process.stdout, stdout_q), daemon=True).start()
-        Thread(target=enqueue_output, args=(process.stderr, stderr_q), daemon=True).start()
-
-        # Read output with a timeout
-        while process.poll() is None:
+            # Use the default shell on Unix-like systems with timeout
             try:
-                # Check stdout
-                try:
-                    line = stdout_q.get_nowait()
-                    if line:
-                        console.print(line.strip())
-                except Empty:
-                    pass
+                result = subprocess.run(
+                    command,
+                    shell=True,
+                    executable="/bin/bash" if IS_LINUX else "/bin/zsh" if IS_MACOS else None,
+                    text=True,
+                    capture_output=True,
+                    timeout=30  # 30 second timeout
+                )
 
-                # Check stderr
-                try:
-                    line = stderr_q.get_nowait()
-                    if line:
-                        console.print("[red]" + line.strip() + "[/red]")
-                except Empty:
-                    pass
-            except Exception:
-                pass
+                # Print output
+                if result.stdout:
+                    console.print(result.stdout.strip())
+                if result.stderr:
+                    console.print("[red]" + result.stderr.strip() + "[/red]")
 
-        # Get remaining output
-        while True:
-            try:
-                line = stdout_q.get_nowait()
-                if line:
-                    console.print(line.strip())
-            except Empty:
-                break
+                return result.returncode
 
-        while True:
-            try:
-                line = stderr_q.get_nowait()
-                if line:
-                    console.print("[red]" + line.strip() + "[/red]")
-            except Empty:
-                break
+            except subprocess.TimeoutExpired:
+                console.print("[red]Command timed out after 30 seconds[/red]")
+                return 1
 
-        return process.returncode
     except Exception as e:
         console.print(f"[red]Error executing command: {str(e)}[/red]")
         return 1
