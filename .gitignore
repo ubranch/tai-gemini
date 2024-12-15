@@ -3,3 +3,7 @@ build/
 lfg_llama.egg-info/
 pyproject.backup.toml
 terminal_ai_assistant.egg-info/
+_context.md
+__pycache__/
+*.py[cod]
+*$py.class
