@@ -11,12 +11,6 @@ setup(
     package_data={
         "tai": ["prompt.md"],
     },
-    install_requires=[
-        "google-generativeai",
-        "rich",
-        "grpcio",
-        "grpcio-tools",
-        "protobuf",
-    ],
+    install_requires=["rich", "requests"],
     entry_points={"console_scripts": ["tai=tai.cli:main"]},
 )

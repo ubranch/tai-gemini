@@ -4,19 +4,14 @@ import signal
 import platform
 import logging
 import subprocess
-from typing import Optional, Tuple
-
-import google.generativeai as genai
-from google.generativeai.types import RequestOptions
-from google.api_core import retry
-
+import json
+import requests
+from typing import Optional, Tuple, Dict, Any
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
-
 from types import FrameType
 from typing_extensions import TypedDict
-
 import pathlib
 
 # Suppress warnings and configure logging
@@ -30,6 +25,10 @@ PLATFORM = platform.system().lower()
 IS_WINDOWS = PLATFORM == "windows"
 IS_LINUX = PLATFORM == "linux"
 IS_MACOS = PLATFORM == "darwin"
+
+# Gemini API configuration
+GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+GEMINI_MODEL = "gemini-exp-1206"
 
 
 def execute_shell_command(command: str) -> int:
@@ -130,11 +129,11 @@ def handle_sigint(signum: int, frame: Optional[FrameType]) -> None:
     sys.exit(0)
 
 
-def get_gemini_client() -> genai.GenerativeModel:
-    """Configures and returns the Gemini API client with grounding enabled.
+def get_gemini_client() -> Dict[str, str]:
+    """Configures and returns the Gemini API configuration.
 
     Returns:
-        genai.GenerativeModel: The configured Gemini model instance
+        Dict[str, str]: The API configuration
 
     Raises:
         ValueError: If the GEMINI_API_KEY environment variable is not set
@@ -143,8 +142,11 @@ def get_gemini_client() -> genai.GenerativeModel:
     if not api_key:
         raise ValueError("GEMINI_API_KEY environment variable is not set")
 
-    genai.configure(api_key=api_key)
-    return genai.GenerativeModel("gemini-exp-1206")
+    return {
+        "api_key": api_key,
+        "base_url": f"{GEMINI_API_BASE}/{GEMINI_MODEL}",
+        "headers": {"Content-Type": "application/json"},
+    }
 
 
 def read_system_prompt() -> str:
@@ -190,43 +192,7 @@ Your response MUST conform to the following schema:
     "explanation": "brief explanation of what the command does",
     "known_command": true/false,
     "platform": "{PLATFORM}"
-}}
-
-###EXAMPLE RESPONSES###
-
-- Example response for a KNOWN command on {PLATFORM}:
-{{
-    "command": "{('dir /a' if IS_WINDOWS else 'ls -la')}",
-    "explanation": "Lists all files and folders, including hidden ones",
-    "known_command": true,
-    "platform": "{PLATFORM}"
-}}
-
-- Example response for an UNKNOWN command:
-{{
-    "command": "",
-    "explanation": "I do not know this command",
-    "known_command": false,
-    "platform": "{PLATFORM}"
-}}
-
-###ADDITIONAL GUIDANCE###
-
-- MAINTAIN clarity and conciseness in explanations.
-- NEVER deviate from the JSON format.
-- If a command has MULTIPLE USE CASES, provide the most common or relevant one unless otherwise specified.
-- ENSURE commands are compatible with the current platform ({PLATFORM}).
-
-###WHAT NOT TO DO###
-
-- NEVER RETURN A RESPONSE THAT DOES NOT MATCH THE JSON SCHEMA.
-- NEVER PROVIDE AN INCORRECT OR UNSUPPORTED COMMAND AS "KNOWN."
-- NEVER INCLUDE UNNECESSARY INFORMATION OUTSIDE THE JSON FORMAT.
-- NEVER OMIT AN EXPLANATION, EVEN FOR UNKNOWN COMMANDS.
-- NEVER PROVIDE WINDOWS COMMANDS ON UNIX-LIKE SYSTEMS OR VICE VERSA.
-
-###TASK OBJECTIVE###
-ENSURE THAT ALL RESPONSES ARE PRECISE, ACCURATE, AND CONSISTENT WITH THE EXPECTED JSON SCHEMA."""
+}}"""
 
 
 def get_response_schema() -> dict:
@@ -238,82 +204,48 @@ def get_response_schema() -> dict:
     return {
         "type": "object",
         "properties": {
-            "command": {"type": "string", "description": "The command to execute"},
-            "explanation": {
-                "type": "string",
-                "description": "Brief explanation of what the command does",
-            },
-            "known_command": {
-                "type": "boolean",
-                "description": "Whether the command is known and valid",
-            },
-            "platform": {
-                "type": "string",
-                "description": "The target platform for the command",
-                "enum": ["windows", "linux", "darwin"],
-            },
+            "command": {"type": "string"},
+            "explanation": {"type": "string"},
+            "known_command": {"type": "boolean"},
+            "platform": {"type": "string", "enum": ["windows", "linux", "darwin"]},
         },
         "required": ["command", "explanation", "known_command", "platform"],
     }
 
 
-def handle_stream(response: genai.types.GenerateContentResponse) -> str:
-    """Processes the response from the LLM.
-
-    Args:
-        response (genai.types.GenerateContentResponse): The response from the Gemini API
-
-    Returns:
-        str: The processed response text
-    """
-    if not response or not response.text:
-        return ""
-
-    # Display the response as formatted markdown
-    return response.text.strip()
-
-
-def send_chat_query(query: str, model: genai.GenerativeModel) -> str:
-    """Sends a query to the Gemini API.
+def send_chat_query(query: str, config: Dict[str, Any]) -> str:
+    """Sends a query to the Gemini API using REST.
 
     Args:
         query (str): The user's query
-        model (genai.GenerativeModel): The Gemini model instance
+        config (Dict[str, Any]): The API configuration
 
     Returns:
         str: The response from the API
     """
     try:
-        # Configure retry options
-        retry_options = RequestOptions(
-            retry=retry.Retry(
-                initial=10,  # Initial delay in seconds
-                multiplier=2,  # Multiplier for exponential backoff
-                maximum=60,  # Maximum delay between retries
-                timeout=300,  # Total timeout in seconds
-            ),
-        )
+        url = f"{config['base_url']}:generateContent?key={config['api_key']}"
 
-        # Define the response schema using TypedDict
-        class CommandResponse(TypedDict):
-            command: str
-            explanation: str
-            known_command: bool
-            platform: str
-
-        response = model.generate_content(
-            [
-                {"role": "user", "parts": [generate_system_prompt(), query]},
+        payload = {
+            "contents": [
+                {"parts": [{"text": generate_system_prompt()}, {"text": query}]}
             ],
-            request_options=retry_options,
-            generation_config=genai.GenerationConfig(
-                temperature=0.2,
-                response_mime_type="application/json",
-                response_schema=CommandResponse,
-            ),
-        )
-        return handle_stream(response)
-    except Exception as e:
+            "generationConfig": {
+                "temperature": 0.0,
+                "response_mime_type": "application/json",
+                "response_schema": get_response_schema(),
+            },
+        }
+
+        response = requests.post(url, headers=config["headers"], json=payload)
+        response.raise_for_status()
+
+        data = response.json()
+        if "candidates" in data and data["candidates"]:
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+        return ""
+
+    except requests.exceptions.RequestException as e:
         console.print(f"[red]Error generating content: {str(e)}[/red]")
         return ""
 
@@ -328,8 +260,6 @@ def parse_response(text: str) -> Tuple[str, str]:
         Tuple[str, str]: A tuple containing the command and its explanation
     """
     try:
-        import json
-
         response_data = json.loads(text)
 
         if not response_data.get("known_command", False):
@@ -409,8 +339,8 @@ def main() -> int:
         query = " ".join(sys.argv[1:])
 
         try:
-            model = get_gemini_client()
-            response = send_chat_query(query, model)
+            config = get_gemini_client()
+            response = send_chat_query(query, config)
             command, _ = parse_response(response)
             if command:
                 execute_command(command)
