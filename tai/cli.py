@@ -3,40 +3,24 @@ import sys
 import signal
 import platform
 import logging
-from types import FrameType
 import subprocess
+from typing import Optional, Tuple
+
 import google.generativeai as genai
 from google.generativeai.types import RequestOptions
 from google.api_core import retry
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
+
+from types import FrameType
 from typing_extensions import TypedDict
+
 import pathlib
-import grpc
-import atexit
 
-# Suppress gRPC warnings and configure logging
-logging.getLogger('absl').setLevel(logging.ERROR)
-os.environ['GRPC_PYTHON_LOG_LEVEL'] = 'error'
-
-# Initialize gRPC channel
-channel = None
-
-def initialize_grpc():
-    global channel
-    channel = grpc.insecure_channel('dummy:50051')
-
-def cleanup_grpc():
-    global channel
-    if channel:
-        channel.close()
-
-# Register cleanup function
-atexit.register(cleanup_grpc)
-
-# Initialize gRPC at startup
-initialize_grpc()
+# Suppress warnings and configure logging
+logging.getLogger("absl").setLevel(logging.ERROR)
 
 # Initialize Rich console
 console = Console()
@@ -46,6 +30,7 @@ PLATFORM = platform.system().lower()
 IS_WINDOWS = PLATFORM == "windows"
 IS_LINUX = PLATFORM == "linux"
 IS_MACOS = PLATFORM == "darwin"
+
 
 def execute_shell_command(command: str) -> int:
     """Execute a shell command in a platform-independent way.
@@ -66,7 +51,7 @@ def execute_shell_command(command: str) -> int:
                 os.path.expanduser("~/scoop/shims"),
                 os.path.expanduser("~/scoop/apps/scoop/current"),
                 "C:\\ProgramData\\scoop\\shims",
-                "C:\\ProgramData\\scoop\\apps\\scoop\\current"
+                "C:\\ProgramData\\scoop\\apps\\scoop\\current",
             ]
 
             path_entries = env.get("PATH", "").split(os.pathsep)
@@ -88,7 +73,7 @@ def execute_shell_command(command: str) -> int:
                     env=env,
                     text=True,
                     capture_output=True,
-                    timeout=30  # 30 second timeout
+                    timeout=30,  # 30 second timeout
                 )
 
                 # Print output
@@ -109,10 +94,12 @@ def execute_shell_command(command: str) -> int:
                 result = subprocess.run(
                     command,
                     shell=True,
-                    executable="/bin/bash" if IS_LINUX else "/bin/zsh" if IS_MACOS else None,
+                    executable=(
+                        "/bin/bash" if IS_LINUX else "/bin/zsh" if IS_MACOS else None
+                    ),
                     text=True,
                     capture_output=True,
-                    timeout=30  # 30 second timeout
+                    timeout=30,  # 30 second timeout
                 )
 
                 # Print output
@@ -132,17 +119,25 @@ def execute_shell_command(command: str) -> int:
         return 1
 
 
-def handle_sigint(signum: int, frame: FrameType) -> None:
-    """Signal handler for Ctrl+C (SIGINT)."""
+def handle_sigint(signum: int, frame: Optional[FrameType]) -> None:
+    """Signal handler for Ctrl+C (SIGINT).
+
+    Args:
+        signum (int): The signal number
+        frame (Optional[FrameType]): The current stack frame
+    """
     console.print("\nCtrl+C detected. Exiting gracefully...")
     sys.exit(0)
 
 
-def get_gemini_client():
+def get_gemini_client() -> genai.GenerativeModel:
     """Configures and returns the Gemini API client with grounding enabled.
 
+    Returns:
+        genai.GenerativeModel: The configured Gemini model instance
+
     Raises:
-        ValueError: If the GEMINI_API_KEY environment variable is not set.
+        ValueError: If the GEMINI_API_KEY environment variable is not set
     """
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
@@ -167,8 +162,16 @@ def read_system_prompt() -> str:
 
 
 def generate_system_prompt() -> str:
-    """Returns the optimized system prompt for the LLM interaction."""
-    platform_specific = "Windows Command Prompt and PowerShell" if IS_WINDOWS else "Bash and Shell commands" if IS_LINUX else "Zsh and Shell commands"
+    """Returns the optimized system prompt for the LLM interaction.
+
+    Returns:
+        str: The generated system prompt
+    """
+    platform_specific = (
+        "Windows Command Prompt and PowerShell"
+        if IS_WINDOWS
+        else "Bash and Shell commands" if IS_LINUX else "Zsh and Shell commands"
+    )
 
     return f"""YOU ARE A WORLD-CLASS SYSTEM ADMINISTRATOR AND ELITE HACKER WITH UNPARALLELED EXPERTISE IN {platform_specific}. YOUR TASK IS TO ACCURATELY INTERPRET QUESTIONS ABOUT COMMANDS AND PROVIDE RESPONSES STRICTLY FOLLOWING THE SPECIFIED JSON SCHEMA.
 
@@ -227,7 +230,11 @@ ENSURE THAT ALL RESPONSES ARE PRECISE, ACCURATE, AND CONSISTENT WITH THE EXPECTE
 
 
 def get_response_schema() -> dict:
-    """Returns the JSON schema for structured command responses."""
+    """Returns the JSON schema for structured command responses.
+
+    Returns:
+        dict: The response schema definition
+    """
     return {
         "type": "object",
         "properties": {
@@ -250,11 +257,14 @@ def get_response_schema() -> dict:
     }
 
 
-def handle_stream(response) -> str:
+def handle_stream(response: genai.types.GenerateContentResponse) -> str:
     """Processes the response from the LLM.
 
     Args:
-        response: The response from the Gemini API.
+        response (genai.types.GenerateContentResponse): The response from the Gemini API
+
+    Returns:
+        str: The processed response text
     """
     if not response or not response.text:
         return ""
@@ -263,12 +273,15 @@ def handle_stream(response) -> str:
     return response.text.strip()
 
 
-def send_chat_query(query: str, model) -> str:
+def send_chat_query(query: str, model: genai.GenerativeModel) -> str:
     """Sends a query to the Gemini API.
 
     Args:
-        query (str): The user's query.
-        model: The Gemini model instance.
+        query (str): The user's query
+        model (genai.GenerativeModel): The Gemini model instance
+
+    Returns:
+        str: The response from the API
     """
     try:
         # Configure retry options
@@ -305,14 +318,14 @@ def send_chat_query(query: str, model) -> str:
         return ""
 
 
-def parse_response(text: str) -> tuple[str, str]:
+def parse_response(text: str) -> Tuple[str, str]:
     """Parses the JSON response from the LLM.
 
     Args:
-        text (str): The JSON response text.
+        text (str): The JSON response text
 
     Returns:
-        tuple[str, str]: The command and its explanation.
+        Tuple[str, str]: A tuple containing the command and its explanation
     """
     try:
         import json
@@ -326,7 +339,9 @@ def parse_response(text: str) -> tuple[str, str]:
         # Verify platform compatibility
         response_platform = response_data.get("platform", "").lower()
         if response_platform != PLATFORM:
-            console.print(f"[yellow]Warning: Command is for {response_platform}, but current platform is {PLATFORM}[/yellow]")
+            console.print(
+                f"[yellow]Warning: Command is for {response_platform}, but current platform is {PLATFORM}[/yellow]"
+            )
             return "", ""
 
         command = response_data.get("command", "").strip()
@@ -349,12 +364,25 @@ def parse_response(text: str) -> tuple[str, str]:
 
 
 def edit_command(command: str) -> str:
+    """Allows the user to edit a command before execution.
+
+    Args:
+        command (str): The original command
+
+    Returns:
+        str: The edited command
+    """
     console.print(Panel(f"Current command: {command}", title="Edit Command"))
     edited_command = Prompt.ask("> ")
     return edited_command.strip() if edited_command.strip() else command
 
 
 def execute_command(command: str) -> None:
+    """Executes a command after user confirmation.
+
+    Args:
+        command (str): The command to execute
+    """
     query = Prompt.ask("\nExecute the command?", choices=["y", "n", "e"], default="n")
     if query.lower() == "y":
         execute_shell_command(command)
@@ -365,14 +393,18 @@ def execute_command(command: str) -> None:
         console.print("\n[yellow]Exiting...[/yellow]")
 
 
-def main():
-    """Initializes the Gemini client and processes the query."""
+def main() -> int:
+    """Main entry point for the CLI application.
+
+    Returns:
+        int: Exit code (0 for success, non-zero for errors)
+    """
     try:
         signal.signal(signal.SIGINT, handle_sigint)
 
         if len(sys.argv) < 2:
             console.print("[red]Usage: tai <query>[/red]")
-            sys.exit(1)
+            return 1
 
         query = " ".join(sys.argv[1:])
 
@@ -382,10 +414,13 @@ def main():
             command, _ = parse_response(response)
             if command:
                 execute_command(command)
+            return 0
         except ValueError as e:
             console.print(f"[red]Error: {e}[/red]")
-    finally:
-        cleanup_grpc()
+            return 1
+    except Exception as e:
+        console.print(f"[red]Unexpected error: {str(e)}[/red]")
+        return 1
 
 
 if __name__ == "__main__":
