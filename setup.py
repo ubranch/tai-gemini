@@ -14,9 +14,9 @@ setup(
     install_requires=[
         "google-generativeai",
         "rich",
-        "grpcio>=1.59.0",
+        "grpcio==1.60.1",
         "grpcio-tools>=1.59.0",
-        "protobuf>=4.25.1"
+        "protobuf>=4.25.1",
     ],
     entry_points={"console_scripts": ["tai=tai.cli:main"]},
 )
