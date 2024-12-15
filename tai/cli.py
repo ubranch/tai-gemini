@@ -13,10 +13,30 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 from typing_extensions import TypedDict
 import pathlib
+import grpc
+import atexit
 
-# Suppress gRPC warnings
+# Suppress gRPC warnings and configure logging
 logging.getLogger('absl').setLevel(logging.ERROR)
 os.environ['GRPC_PYTHON_LOG_LEVEL'] = 'error'
+
+# Initialize gRPC channel
+channel = None
+
+def initialize_grpc():
+    global channel
+    channel = grpc.insecure_channel('dummy:50051')
+
+def cleanup_grpc():
+    global channel
+    if channel:
+        channel.close()
+
+# Register cleanup function
+atexit.register(cleanup_grpc)
+
+# Initialize gRPC at startup
+initialize_grpc()
 
 # Initialize Rich console
 console = Console()
@@ -347,22 +367,25 @@ def execute_command(command: str) -> None:
 
 def main():
     """Initializes the Gemini client and processes the query."""
-    signal.signal(signal.SIGINT, handle_sigint)
-
-    if len(sys.argv) < 2:
-        console.print("[red]Usage: tai <query>[/red]")
-        sys.exit(1)
-
-    query = " ".join(sys.argv[1:])
-
     try:
-        model = get_gemini_client()
-        response = send_chat_query(query, model)
-        command, _ = parse_response(response)
-        if command:
-            execute_command(command)
-    except ValueError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        signal.signal(signal.SIGINT, handle_sigint)
+
+        if len(sys.argv) < 2:
+            console.print("[red]Usage: tai <query>[/red]")
+            sys.exit(1)
+
+        query = " ".join(sys.argv[1:])
+
+        try:
+            model = get_gemini_client()
+            response = send_chat_query(query, model)
+            command, _ = parse_response(response)
+            if command:
+                execute_command(command)
+        except ValueError as e:
+            console.print(f"[red]Error: {e}[/red]")
+    finally:
+        cleanup_grpc()
 
 
 if __name__ == "__main__":
