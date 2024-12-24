@@ -1,1 +1,4 @@
-google-generativeai
+rich==13.7.0
+requests==2.31.0
+pyperclip==1.8.2
+typing-extensions==4.9.0

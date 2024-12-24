@@ -6,12 +6,12 @@ import logging
 import subprocess
 import json
 import requests
+import pyperclip
 from typing import Optional, Tuple, Dict, Any
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
 from types import FrameType
-from typing_extensions import TypedDict
 import pathlib
 
 # Suppress warnings and configure logging
@@ -28,91 +28,55 @@ IS_MACOS = PLATFORM == "darwin"
 
 # Gemini API configuration
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
-GEMINI_MODEL = "gemini-exp-1206"
+GEMINI_MODEL = "gemini-2.0-flash-exp"
+
+
+def _execute_windows_command(command: str, env: dict) -> int:
+    """Execute a command on Windows platform."""
+    # Use cmd.exe instead of PowerShell for better compatibility
+    cmd_command = f'cmd.exe /c "{command}"'
+    return _run_with_timeout(cmd_command, shell=True, env=env)
+
+
+def _execute_unix_command(command: str) -> int:
+    """Execute a command on Unix-like platforms."""
+    shell = "/bin/bash" if IS_LINUX else "/bin/zsh" if IS_MACOS else None
+    return _run_with_timeout(command, shell=True, executable=shell)
+
+
+def _run_with_timeout(command: str, **kwargs) -> int:
+    """Execute a command with timeout and output handling."""
+    try:
+        result = subprocess.run(
+            command, text=True, capture_output=True, timeout=30, **kwargs
+        )
+        if result.stdout:
+            console.print(result.stdout.strip())
+        if result.stderr:
+            console.print("[red]" + result.stderr.strip() + "[/red]")
+        return result.returncode
+    except subprocess.TimeoutExpired:
+        console.print("[red]Command timed out after 30 seconds[/red]")
+        return 1
 
 
 def execute_shell_command(command: str) -> int:
-    """Execute a shell command in a platform-independent way.
-
-    Args:
-        command (str): The command to execute
-
-    Returns:
-        int: The return code from the command execution
-    """
+    """Execute a shell command in a platform-independent way."""
     try:
         if IS_WINDOWS:
-            # Get the user's environment PATH
             env = os.environ.copy()
-
-            # Add common Windows Scoop paths if not present
             scoop_paths = [
                 os.path.expanduser("~/scoop/shims"),
                 os.path.expanduser("~/scoop/apps/scoop/current"),
                 "C:\\ProgramData\\scoop\\shims",
                 "C:\\ProgramData\\scoop\\apps\\scoop\\current",
             ]
-
             path_entries = env.get("PATH", "").split(os.pathsep)
-            for scoop_path in scoop_paths:
-                if os.path.exists(scoop_path) and scoop_path not in path_entries:
-                    path_entries.append(scoop_path)
-
-            env["PATH"] = os.pathsep.join(path_entries)
-
-            # Properly escape and format the PowerShell command
-            escaped_command = command.replace('"', '`"')
-            powershell_command = f'powershell.exe -NoProfile -NonInteractive -Command "& {{{escaped_command}}}"'
-
-            # Execute command with a timeout
-            try:
-                result = subprocess.run(
-                    powershell_command,
-                    shell=True,
-                    env=env,
-                    text=True,
-                    capture_output=True,
-                    timeout=30,  # 30 second timeout
-                )
-
-                # Print output
-                if result.stdout:
-                    console.print(result.stdout.strip())
-                if result.stderr:
-                    console.print("[red]" + result.stderr.strip() + "[/red]")
-
-                return result.returncode
-
-            except subprocess.TimeoutExpired:
-                console.print("[red]Command timed out after 30 seconds[/red]")
-                return 1
-
-        else:
-            # Use the default shell on Unix-like systems with timeout
-            try:
-                result = subprocess.run(
-                    command,
-                    shell=True,
-                    executable=(
-                        "/bin/bash" if IS_LINUX else "/bin/zsh" if IS_MACOS else None
-                    ),
-                    text=True,
-                    capture_output=True,
-                    timeout=30,  # 30 second timeout
-                )
-
-                # Print output
-                if result.stdout:
-                    console.print(result.stdout.strip())
-                if result.stderr:
-                    console.print("[red]" + result.stderr.strip() + "[/red]")
-
-                return result.returncode
-
-            except subprocess.TimeoutExpired:
-                console.print("[red]Command timed out after 30 seconds[/red]")
-                return 1
-
+            env["PATH"] = os.pathsep.join(
+                path_entries + [p for p in scoop_paths if os.path.exists(p)]
+            )
+            return _execute_windows_command(command, env)
+        return _execute_unix_command(command)
     except Exception as e:
         console.print(f"[red]Error executing command: {str(e)}[/red]")
         return 1
@@ -251,14 +215,7 @@ def send_chat_query(query: str, config: Dict[str, Any]) -> str:
 
 
 def parse_response(text: str) -> Tuple[str, str]:
-    """Parses the JSON response from the LLM.
-
-    Args:
-        text (str): The JSON response text
-
-    Returns:
-        Tuple[str, str]: A tuple containing the command and its explanation
-    """
+    """Parses the JSON response from the LLM."""
     try:
         response_data = json.loads(text)
 
@@ -278,13 +235,7 @@ def parse_response(text: str) -> Tuple[str, str]:
         explanation = response_data.get("explanation", "").strip()
 
         if command and explanation:
-            console.print(
-                Panel(
-                    f"Command: {command}\nExplanation: {explanation}\nPlatform: {PLATFORM}",
-                    title="Command Details",
-                ),
-                style="bold green",
-            )
+            console.print(f"[green]{command}[/green]")
             return command, explanation
 
         return "", ""
@@ -294,33 +245,20 @@ def parse_response(text: str) -> Tuple[str, str]:
 
 
 def edit_command(command: str) -> str:
-    """Allows the user to edit a command before execution.
-
-    Args:
-        command (str): The original command
-
-    Returns:
-        str: The edited command
-    """
-    console.print(Panel(f"Current command: {command}", title="Edit Command"))
+    """Allows the user to edit a command before execution."""
     edited_command = Prompt.ask("> ")
     return edited_command.strip() if edited_command.strip() else command
 
 
-def execute_command(command: str) -> None:
-    """Executes a command after user confirmation.
-
-    Args:
-        command (str): The command to execute
-    """
-    query = Prompt.ask("\nExecute the command?", choices=["y", "n", "e"], default="n")
+def copy_to_clipboard(command: str) -> None:
+    """Copies the command to clipboard."""
+    query = Prompt.ask("Copy to clipboard?", choices=["y", "n"], default="n")
     if query.lower() == "y":
-        execute_shell_command(command)
-    elif query.lower() == "e":
-        edited_command = edit_command(command)
-        execute_shell_command(edited_command)
-    else:
-        console.print("\n[yellow]Exiting...[/yellow]")
+        try:
+            pyperclip.copy(command)
+            console.print("[green]Copied to clipboard![/green]")
+        except Exception as e:
+            console.print(f"[red]Failed to copy: {str(e)}[/red]")
 
 
 def main() -> int:
@@ -343,7 +281,7 @@ def main() -> int:
             response = send_chat_query(query, config)
             command, _ = parse_response(response)
             if command:
-                execute_command(command)
+                copy_to_clipboard(command)
             return 0
         except ValueError as e:
             console.print(f"[red]Error: {e}[/red]")

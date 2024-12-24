@@ -11,6 +11,6 @@ setup(
     package_data={
         "tai": ["prompt.md"],
     },
-    install_requires=["rich", "requests"],
+    install_requires=["rich", "requests", "pyperclip"],
     entry_points={"console_scripts": ["tai=tai.cli:main"]},
 )
